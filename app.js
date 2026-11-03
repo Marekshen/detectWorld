@@ -18,6 +18,9 @@ let nextId = 1;
 let ocrBusy = false;
 let lastOcr = 0;
 
+const VERSION = '1.0.1';
+$('ver').textContent = `DetectWorld v${VERSION}`;
+
 const setStatus = s => { statusEl.textContent = s; };
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
