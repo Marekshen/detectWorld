@@ -14,11 +14,12 @@ const HUMAN = [[0.10, 0.17], [0.34, 0.20], [0.47, 0.50], [0.38, 0.52], [0.29, 0.
 let model, worker, workerInit, stream, running = false;
 let facing = 'environment';
 let tracks = [];
+let plates = [];
 let nextId = 1;
 let ocrBusy = false;
 let lastOcr = 0;
 
-const VERSION = '1.0.1';
+const VERSION = '1.0.3';
 $('ver').textContent = `DetectWorld v${VERSION}`;
 
 const setStatus = s => { statusEl.textContent = s; };
@@ -37,6 +38,7 @@ async function openCamera() {
   canvas.height = video.videoHeight;
   stage.style.aspectRatio = `${canvas.width}/${canvas.height}`;
   tracks = [];
+  plates = [];
 }
 
 function initOcr() {
@@ -111,7 +113,7 @@ function update(dets) {
       best.seen = now;
       used.add(best);
     } else {
-      const t = { id: nextId++, kind, box, score: d.score, seen: now, votes: {}, plate: null, ocrAt: 0 };
+      const t = { id: nextId++, kind, box, score: d.score, seen: now };
       tracks.push(t);
       used.add(t);
     }
@@ -131,6 +133,7 @@ function draw() {
     if (t.kind === 'person') drawPerson(t);
     else drawVehicle(t);
   }
+  drawPlates();
 }
 
 function glow(color) {
@@ -161,16 +164,31 @@ function drawPerson(t) {
   label(`人 ${Math.round(t.score * 100)}%`, x, y, color);
 }
 
+function plateOf(box) {
+  const now = performance.now();
+  return plates.find(p => plateShown(p) && now - p.seen < 4000 &&
+    p.box.x + p.box.w / 2 >= box.x && p.box.x + p.box.w / 2 <= box.x + box.w &&
+    p.box.y + p.box.h / 2 >= box.y && p.box.y + p.box.h / 2 <= box.y + box.h);
+}
+
 function drawVehicle(t) {
   const { x, y, w, h } = t.box;
   glow(COLOR.vehicle);
   ctx.strokeRect(x, y, w, h);
-  if (t.plate) {
-    const r = t.plate.rel;
+  const p = plateOf(t.box);
+  label(p ? `車 ${p.text}` : '車', x, y, p ? COLOR.plate : COLOR.vehicle);
+}
+
+function drawPlates() {
+  const now = performance.now();
+  for (const p of plates) {
+    if (!plateShown(p) || now - p.seen > 4000) continue;
+    const { x, y, w, h } = p.box;
     glow(COLOR.plate);
-    ctx.strokeRect(x + r.x * w, y + r.y * h, r.w * w, r.h * h);
+    ctx.strokeRect(x, y, w, h);
+    const inCar = tracks.some(t => t.kind === 'vehicle' && now - t.seen < 300 && plateOf(t.box) === p);
+    if (!inCar) label(`牌 ${p.text}`, x, y, COLOR.plate);
   }
-  label(t.plate ? `車 ${t.plate.text}` : '車', x, y, t.plate ? COLOR.plate : COLOR.vehicle);
 }
 
 function label(text, x, y, color) {
@@ -194,57 +212,130 @@ function label(text, x, y, color) {
 function maybeOcr() {
   if (!worker || ocrBusy) return;
   const now = performance.now();
-  if (now - lastOcr < 600) return;
-  const t = tracks
-    .filter(v => v.kind === 'vehicle' && !v.plate && v.box.w > canvas.width * 0.12 && now - v.seen < 300)
-    .sort((a, b) => a.ocrAt - b.ocrAt)[0];
-  if (!t) return;
+  if (now - lastOcr < 400) return;
   ocrBusy = true;
   lastOcr = now;
-  t.ocrAt = now;
-  readPlate(t).catch(() => {}).finally(() => { ocrBusy = false; });
+  readPlates().catch(() => {}).finally(() => { ocrBusy = false; });
 }
 
-async function readPlate(t) {
-  const { x, y, w, h } = t.box;
-  const sx = Math.max(0, x);
-  const sy = Math.max(0, y + h * 0.35);
-  const sw = Math.min(w, canvas.width - sx);
-  const sh = Math.min(h * 0.65, canvas.height - sy);
-  if (sw < 40 || sh < 20) return;
-  const scale = Math.min(2, 800 / sw);
-  ocrCanvas.width = Math.round(sw * scale);
-  ocrCanvas.height = Math.round(sh * scale);
-  ocrCtx.filter = 'grayscale(1) contrast(1.5)';
-  ocrCtx.drawImage(video, sx, sy, sw, sh, 0, 0, ocrCanvas.width, ocrCanvas.height);
-  const { data } = await worker.recognize(ocrCanvas);
-  for (const line of data.lines || []) {
-    if (line.confidence < 55) continue;
-    const text = parsePlate(line.text);
-    if (!text) continue;
-    t.votes[text] = (t.votes[text] || 0) + 1;
-    if (t.votes[text] >= 2) {
-      const b = line.bbox;
-      t.plate = {
-        text,
-        rel: {
-          x: (sx + b.x0 / scale - x) / w,
-          y: (sy + b.y0 / scale - y) / h,
-          w: (b.x1 - b.x0) / scale / w,
-          h: (b.y1 - b.y0) / scale / h,
-        },
-      };
-    }
-    break;
+function addPlate(text, box, conf) {
+  const now = performance.now();
+  const p = plates.find(v => v.text === text);
+  if (p) {
+    p.box = box;
+    p.seen = now;
+    p.votes++;
+    p.conf = Math.max(p.conf, conf);
+  } else {
+    plates.push({ text, box, seen: now, votes: 1, conf });
   }
 }
 
+function unionBox(parts, scale) {
+  const x0 = Math.min(...parts.map(p => p.bbox.x0));
+  const y0 = Math.min(...parts.map(p => p.bbox.y0));
+  const x1 = Math.max(...parts.map(p => p.bbox.x1));
+  const y1 = Math.max(...parts.map(p => p.bbox.y1));
+  return { x: x0 / scale, y: y0 / scale, w: (x1 - x0) / scale, h: (y1 - y0) / scale };
+}
+
+let regionIdx = 0;
+
+function regions() {
+  const W = canvas.width;
+  const H = canvas.height;
+  const now = performance.now();
+  const clip = (x, y, w, h) => {
+    const x0 = Math.max(0, x);
+    const y0 = Math.max(0, y);
+    return { x: x0, y: y0, w: Math.min(W, x + w) - x0, h: Math.min(H, y + h) - y0 };
+  };
+  const veh = tracks
+    .filter(t => t.kind === 'vehicle' && now - t.seen < 300)
+    .map(({ box: { x, y, w, h } }) => clip(x - w * 0.1, y + h * 0.3, w * 1.2, h * 0.8));
+  const cols = 3;
+  const rows = 2;
+  const tw = (W / cols) * 1.3;
+  const th = (H / rows) * 1.3;
+  const tiles = [];
+  for (let j = 0; j < rows; j++) {
+    for (let i = 0; i < cols; i++) tiles.push(clip(i * (W - tw) / (cols - 1), j * (H - th) / (rows - 1), tw, th));
+  }
+  return veh.length && regionIdx % 3 ? veh : tiles;
+}
+
+async function readPlates() {
+  const list = regions();
+  const r = list[regionIdx++ % list.length];
+  if (r.w < 40 || r.h < 20) return;
+  const scale = Math.min(3, Math.max(0.5, 1000 / r.w));
+  ocrCanvas.width = Math.round(r.w * scale);
+  ocrCanvas.height = Math.round(r.h * scale);
+  ocrCtx.filter = 'grayscale(1) contrast(1.4)';
+  ocrCtx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, ocrCanvas.width, ocrCanvas.height);
+  const { data } = await worker.recognize(ocrCanvas);
+  plates = plates.filter(p => performance.now() - p.seen < 8000);
+  for (const line of data.lines || []) {
+    const words = (line.words || []).filter(w => w.confidence > 30);
+    const cands = [];
+    for (let i = 0; i < words.length - 1; i++) {
+      cands.push([words[i].text + '-' + words[i + 1].text, [words[i], words[i + 1]]]);
+    }
+    cands.push([line.text, [line]]);
+    for (const w of words) cands.push([w.text, [w]]);
+    for (const [raw, parts] of cands) {
+      const text = parsePlate(raw);
+      if (!text) continue;
+      const b = unionBox(parts, scale);
+      b.x += r.x;
+      b.y += r.y;
+      addPlate(text, b, Math.min(...parts.map(p => p.confidence)));
+      break;
+    }
+  }
+}
+
+const plateShown = p => (p.votes >= 2 || p.conf >= 80) && performance.now() - p.seen < 4000;
+
+const TO_DIGIT = { O: '0', Q: '0', D: '0', I: '1', L: '1', Z: '2', S: '5', G: '6', B: '8' };
+const TO_LETTER = { 0: 'O', 1: 'I', 2: 'Z', 5: 'S', 6: 'G', 8: 'B' };
+const convert = (s, own, map) => {
+  let fixed = 0;
+  const out = [...s].map(c => {
+    if (own.test(c)) return c;
+    fixed++;
+    return map[c] || '?';
+  }).join('');
+  return fixed > 1 ? '?' : out;
+};
+const asLetters = s => convert(s, /[A-Z]/, TO_LETTER);
+const asDigits = s => convert(s, /\d/, TO_DIGIT);
+
+function fit(a, b) {
+  const l = asLetters(a);
+  const d = asDigits(b);
+  if (/^[A-Z]{2,3}$/.test(l) && /^\d{3,4}$/.test(d)) return `${l}-${d}`;
+  const d2 = asDigits(a);
+  const l2 = asLetters(b);
+  if (/^\d{3,4}$/.test(d2) && /^[A-Z]{2,3}$/.test(l2)) return `${d2}-${l2}`;
+  return null;
+}
+
 function parsePlate(raw) {
-  const s = raw.toUpperCase().replace(/[^A-Z0-9-]/g, '').replace(/^-+|-+$/g, '');
-  let m = s.match(/[A-Z0-9]{2,4}-[A-Z0-9]{2,4}/);
-  if (m && /\d/.test(m[0]) && /[A-Z]/.test(m[0])) return m[0];
-  m = s.match(/^([A-Z]{2,3})(\d{3,4})$|^(\d{3,4})([A-Z]{2,3})$/);
-  if (m) return m[1] ? `${m[1]}-${m[2]}` : `${m[3]}-${m[4]}`;
+  const s = raw.toUpperCase().replace(/[·.•_\s-]+/g, '-').replace(/[^A-Z0-9-]/g, '').replace(/^-+|-+$/g, '');
+  if (s.includes('-')) {
+    const parts = s.split('-').filter(Boolean);
+    for (let i = 0; i < parts.length - 1; i++) {
+      const r = fit(parts[i], parts[i + 1]);
+      if (r) return r;
+    }
+    return null;
+  }
+  if (s.length < 5 || s.length > 7) return null;
+  for (const k of [2, 3, 4]) {
+    const r = fit(s.slice(0, k), s.slice(k));
+    if (r) return r;
+  }
   return null;
 }
 
