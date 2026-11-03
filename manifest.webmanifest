@@ -1,0 +1,14 @@
+{
+  "name": "DetectWorld",
+  "short_name": "DetectWorld",
+  "description": "即時偵測人、車與車牌",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "any",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    {"src": "icon.svg", "sizes": "192x192 512x512", "type": "image/svg+xml", "purpose": "any"}
+  ]
+}
