@@ -7,8 +7,11 @@ const statusEl = $('status');
 const ocrCanvas = document.createElement('canvas');
 const ocrCtx = ocrCanvas.getContext('2d');
 
-const VEHICLES = new Set(['car', 'truck', 'bus', 'motorcycle']);
-const COLOR = { person: '#00ffa6', vehicle: '#ff2bd6', plate: '#ffee00' };
+const KIND = { person: 'person', car: 'vehicle', truck: 'vehicle', bus: 'vehicle', motorcycle: 'vehicle', cat: 'cat', dog: 'dog', 'cell phone': 'phone' };
+const COLOR = { person: '#00ffa6', vehicle: '#ff2bd6', plate: '#ffee00', cat: '#ff9f1c', dog: '#3da5ff', phone: '#b388ff' };
+const NAME = { person: '人', vehicle: '車', plate: '車牌', cat: '貓', dog: '狗', phone: '手機' };
+const settings = Object.fromEntries(Object.keys(NAME).map(k => [k, true]));
+try { Object.assign(settings, JSON.parse(localStorage.getItem('settings'))); } catch {}
 const HUMAN = [[0.10, 0.17], [0.34, 0.20], [0.47, 0.50], [0.38, 0.52], [0.29, 0.34], [0.25, 0.52], [0.25, 1], [0.04, 1], [0.03, 0.64]];
 
 let model, worker, workerInit, stream, running = false;
@@ -19,7 +22,7 @@ let nextId = 1;
 let ocrBusy = false;
 let lastOcr = 0;
 
-const VERSION = '1.0.3';
+const VERSION = '1.1.0';
 $('ver').textContent = `DetectWorld v${VERSION}`;
 
 const setStatus = s => { statusEl.textContent = s; };
@@ -97,8 +100,8 @@ function update(dets) {
   const now = performance.now();
   const used = new Set();
   for (const d of dets) {
-    const kind = d.class === 'person' ? 'person' : VEHICLES.has(d.class) ? 'vehicle' : null;
-    if (!kind) continue;
+    const kind = KIND[d.class];
+    if (!kind || !settings[kind]) continue;
     const box = { x: d.bbox[0], y: d.bbox[1], w: d.bbox[2], h: d.bbox[3] };
     let best = null;
     let bestIou = 0.3;
@@ -130,8 +133,10 @@ function draw() {
   ctx.lineCap = 'round';
   for (const t of tracks) {
     if (now - t.seen > 300) continue;
+    if (!settings[t.kind]) continue;
     if (t.kind === 'person') drawPerson(t);
-    else drawVehicle(t);
+    else if (t.kind === 'vehicle') drawVehicle(t);
+    else drawBox(t);
   }
   drawPlates();
 }
@@ -164,8 +169,16 @@ function drawPerson(t) {
   label(`人 ${Math.round(t.score * 100)}%`, x, y, color);
 }
 
+function drawBox(t) {
+  const { x, y, w, h } = t.box;
+  glow(COLOR[t.kind]);
+  ctx.strokeRect(x, y, w, h);
+  label(`${NAME[t.kind]} ${Math.round(t.score * 100)}%`, x, y, COLOR[t.kind]);
+}
+
 function plateOf(box) {
   const now = performance.now();
+  if (!settings.plate) return null;
   return plates.find(p => plateShown(p) && now - p.seen < 4000 &&
     p.box.x + p.box.w / 2 >= box.x && p.box.x + p.box.w / 2 <= box.x + box.w &&
     p.box.y + p.box.h / 2 >= box.y && p.box.y + p.box.h / 2 <= box.y + box.h);
@@ -180,6 +193,7 @@ function drawVehicle(t) {
 }
 
 function drawPlates() {
+  if (!settings.plate) return;
   const now = performance.now();
   for (const p of plates) {
     if (!plateShown(p) || now - p.seen > 4000) continue;
@@ -210,7 +224,7 @@ function label(text, x, y, color) {
 }
 
 function maybeOcr() {
-  if (!worker || ocrBusy) return;
+  if (!settings.plate || !worker || ocrBusy) return;
   const now = performance.now();
   if (now - lastOcr < 400) return;
   ocrBusy = true;
@@ -338,6 +352,21 @@ function parsePlate(raw) {
   }
   return null;
 }
+
+const panel = $('panel');
+for (const k of Object.keys(NAME)) {
+  const label = document.createElement('label');
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.checked = settings[k];
+  box.addEventListener('change', () => {
+    settings[k] = box.checked;
+    try { localStorage.setItem('settings', JSON.stringify(settings)); } catch {}
+  });
+  label.append(box, NAME[k]);
+  panel.append(label);
+}
+$('settings').addEventListener('click', () => { panel.hidden = !panel.hidden; });
 
 $('start').addEventListener('click', start);
 $('flip').addEventListener('click', async () => {

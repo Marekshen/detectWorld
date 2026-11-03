@@ -1,4 +1,4 @@
-const CACHE = 'detectworld-v1.0.3';
+const CACHE = 'detectworld-v1.1.0';
 const SHELL = ['./', 'index.html', 'app.js', 'style.css', 'manifest.webmanifest', 'icon.svg'];
 
 self.addEventListener('install', e => {
